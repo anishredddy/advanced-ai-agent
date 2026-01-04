@@ -3,6 +3,8 @@ from datetime import datetime
 import time
 from openai import OpenAI
 import json
+from dotenv import load_dotenv
+import os
 
 from .models import (
     AgentState,
@@ -14,13 +16,14 @@ from .models import (
 from .firecrawl import FireCrawlServices
 from .prompts import DeveloperToolsPrompts
 
+load_dotenv()
 
 class AgentWorkflow:
     def __init__(self):
         self.firecrawl = FireCrawlServices()
         self.client = OpenAI(
             base_url="https://models.github.ai/inference",
-            api_key="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"
+            api_key=os.getenv("GITHUB_API_TOKEN")
         )
         self.prompts = DeveloperToolsPrompts()
         print()
