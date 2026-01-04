@@ -1,8 +1,8 @@
 from typing import List
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from datetime import datetime
 import time
-from openai import OpenAI
-import json
 
 from .models import (
     AgentState,
@@ -18,10 +18,12 @@ from .prompts import DeveloperToolsPrompts
 class AgentWorkflow:
     def __init__(self):
         self.firecrawl = FireCrawlServices()
-        self.client = OpenAI(
-            base_url="https://models.github.ai/inference",
-            api_key="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"
+        self.llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            temperature=0.8
         )
+        
+        
         self.prompts = DeveloperToolsPrompts()
         print()
 
@@ -75,22 +77,10 @@ class AgentWorkflow:
     def agent_decision_step(self, state: AgentState) -> AgentState:
         messages = self._build_llm_messages(state)
 
+        structured_llm = self.llm.with_structured_output(AgentDecision)
+
         try:
-            # Get structured output using OpenAI's response_format
-            completion = self.client.chat.completions.create(
-                model="gpt-4o",  # or your preferred model
-                messages=messages,
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "agent_decision",
-                        "schema": AgentDecision.model_json_schema()
-                    }
-                }
-            )
-            
-            decision_dict = json.loads(completion.choices[0].message.content)
-            decision = AgentDecision(**decision_dict)
+            decision: AgentDecision = structured_llm.invoke(messages)
 
             # ---------------- RESPOND / ASK ----------------
             if decision.decision_type in {"respond", "ask_question"}:
@@ -140,6 +130,7 @@ class AgentWorkflow:
                 else:
                     print(f"\n🔬 Agent researching {len(company_names)} companies: {', '.join(company_names)}")
                 
+
                 researched_count = 0
                 for company_name in company_names:
                     print(f"\n  → Researching {company_name}...")
@@ -149,10 +140,10 @@ class AgentWorkflow:
                         researched_count += 1
                 
                 state.conversation_history.append(
-                    Message(
-                        role="tool",
-                        content=f"Researched {researched_count}/{len(company_names)} companies: {', '.join(company_names)}",
-                        timestamp=datetime.now()
+                Message(
+                    role="tool",
+                    content=f"Researched {researched_count}/{len(company_names)} companies: {', '.join(company_names)}",
+                    timestamp=datetime.now()
                     )
                 )
 
@@ -174,12 +165,12 @@ class AgentWorkflow:
 
                 print(f"\n🤖 Agent: {analysis}")
                 state.conversation_history.append(
-                    Message(
-                        role="assistant",
-                        content=analysis,
-                        timestamp=datetime.now()
+                        Message(
+                            role="assistant",
+                            content=analysis,
+                            timestamp=datetime.now()
+                        )
                     )
-                )
                 state.awaiting_user_input = True
 
             # ---------------- END ----------------
@@ -210,25 +201,21 @@ class AgentWorkflow:
     # ============================================================
 
     def _build_llm_messages(self, state: AgentState):
-        """Convert conversation history to OpenAI message format"""
         messages = [
-            {"role": "system", "content": self.prompts.AGENT_SYSTEM_PROMPT}
+            SystemMessage(content=self.prompts.AGENT_SYSTEM_PROMPT)
         ]
 
         for msg in state.conversation_history:
             if msg.role == "user":
-                messages.append({"role": "user", "content": msg.content})
+                messages.append(HumanMessage(content=msg.content))
             elif msg.role == "assistant":
-                messages.append({"role": "assistant", "content": msg.content})
+                messages.append(AIMessage(content=msg.content))
             elif msg.role == "tool":
-                # OpenAI doesn't have a "tool" role in the same way, so use system
-                messages.append({"role": "system", "content": f"[Tool Result] {msg.content}"})
+                messages.append(SystemMessage(content=f"[Tool Result] {msg.content}"))
 
-        # Add current context as system message
-        messages.append({
-            "role": "system",
-            "content": f"Current Context:\n{self._build_context_summary(state)}"
-        })
+        messages.append(
+            SystemMessage(content=f"Current Context:\n{self._build_context_summary(state)}")
+        )
 
         return messages
 
@@ -287,22 +274,17 @@ class AgentWorkflow:
 
         # Extract tool names using LLM
         messages = [
-            {"role": "system", "content": self.prompts.TOOL_EXTRACTION_SYSTEM},
-            {"role": "user", "content": self.prompts.tool_extraction_user(query, all_content)}
+            SystemMessage(content=self.prompts.TOOL_EXTRACTION_SYSTEM),
+            HumanMessage(content=self.prompts.tool_extraction_user(query, all_content))
         ]
 
         extraction_start = time.time()
         
         try:
-            completion = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=messages
-            )
-            
-            response_content = completion.choices[0].message.content
+            response = self.llm.invoke(messages)
             tool_names = [
                 name.strip()
-                for name in response_content.strip().split("\n")
+                for name in response.content.strip().split("\n")
                 if name.strip()
             ]
 
@@ -374,6 +356,7 @@ class AgentWorkflow:
             company.integration_capabilities = analysis.integration_capabilities
 
         print(f"✅ Researched {company_name}")
+
         print(company)
         return company
 
@@ -381,26 +364,15 @@ class AgentWorkflow:
         """Analyze company content using structured LLM output - matches static workflow"""
         start_time = time.time()
 
+        structured_llm = self.llm.with_structured_output(CompanyAnalysis)
+
         messages = [
-            {"role": "system", "content": self.prompts.TOOL_ANALYSIS_SYSTEM},
-            {"role": "user", "content": self.prompts.tool_analysis_user(company_name, content)}
+            SystemMessage(content=self.prompts.TOOL_ANALYSIS_SYSTEM),
+            HumanMessage(content=self.prompts.tool_analysis_user(company_name, content))
         ]
 
         try:
-            completion = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=messages,
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "company_analysis",
-                        "schema": CompanyAnalysis.model_json_schema()
-                    }
-                }
-            )
-            
-            analysis_dict = json.loads(completion.choices[0].message.content)
-            analysis = CompanyAnalysis(**analysis_dict)
+            analysis = structured_llm.invoke(messages)
 
             elapsed = time.time() - start_time
             print(f"\nAnalysed {company_name} in {elapsed:.2f} seconds\n")
@@ -435,19 +407,16 @@ class AgentWorkflow:
         start_time = time.time()
 
         messages = [
-            {"role": "system", "content": self.prompts.RECOMMENDATIONS_SYSTEM},
-            {"role": "user", "content": self.prompts.recommendations_user(
+            SystemMessage(content=self.prompts.RECOMMENDATIONS_SYSTEM),
+            HumanMessage(content=self.prompts.recommendations_user(
                 state.current_query,
                 company_data
-            )}
+            ))
         ]
 
-        completion = self.client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages
-        )
+        response = self.llm.invoke(messages)
 
         elapsed = time.time() - start_time
         print(f"\nLLM final output in {elapsed:.2f} seconds\n")
 
-        return completion.choices[0].message.content
+        return response.content
